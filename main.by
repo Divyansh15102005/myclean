@@ -1,0 +1,244 @@
+import asyncio
+import datetime
+from pymongo import MongoClient
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+)
+
+# MongoDB setup
+MONGO_URI = "mongodb+srv://ajaysatbhaiya2:dLZCnGpVw6lpDqgd@elitebot.hdw8vtg.mongodb.net/?retryWrites=true&w=majority"
+client = MongoClient(MONGO_URI)
+db = client["mlm_bot"]
+users = db["users"]
+transactions = db["transactions"]
+
+# Admin and payment details
+ADMIN_ID = 5856521394
+UPI_ID = "9889036619@pthdfc"
+
+# ========== Handlers ==========
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ref = int(context.args[0]) if context.args else None
+
+    if not users.find_one({"user_id": user.id}):
+        users.insert_one({
+            "user_id": user.id,
+            "username": user.username,
+            "ref_by": ref,
+            "points": 0,
+            "paid": False,
+            "joined": datetime.datetime.now()
+        })
+
+        await update.message.reply_text(
+            "🎉 बधाई हो! आपने बॉट को जॉइन कर लिया है।\n\n"
+            "💼 Network Marketing Plan:\n"
+            "✅ ₹500 में इस बॉट का Premium Member बनें\n"
+            "✅ और referral से ₹20,000 से ₹30,000+ महीना तक कमाएँ\n\n"
+            "💸 Referral Commission Structure:\n"
+            "👥 Level 1 (Direct): ₹200 प्रति सदस्य\n"
+            "👥 Level 2: ₹120 प्रति सदस्य\n"
+            "👥 Level 3: ₹80 प्रति सदस्य\n\n"
+            "🔐 Important:\n"
+            "बिना ₹500 पेमेंट किए आप रेफरल लिंक नहीं बना सकते और कमाई शुरू नहीं होगी।\n\n"
+            "🪙 पेमेंट के लिए /pay कमांड भेजें।\n"
+            "🙋‍♂ और मदद के लिए /help टाइप करें।"
+        )
+    else:
+        await update.message.reply_text(
+            "✅ आप पहले से रजिस्टर हैं।\n"
+            "💡 कमाई शुरू करने के लिए ₹500 पे करें – /pay टाइप करें।"
+        )
+
+async def referral_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = users.find_one({"user_id": update.effective_user.id})
+    if not user or not user.get("paid", False):
+        await update.message.reply_text("❌ आप तब तक रेफर नहीं कर सकते जब तक ₹500 पेमेंट न करें।\n/pay कमांड से पे करें।")
+        return
+
+    bot_username = (await context.bot.get_me()).username
+    await update.message.reply_text(
+        f"🔗 आपका रेफरल लिंक:\nhttps://t.me/{bot_username}?start={update.effective_user.id}"
+    )
+
+async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ यह कमांड केवल Admin के लिए है।")
+        return
+
+    try:
+        user_id = int(update.message.text.split("_")[1])
+        user = users.find_one({"user_id": user_id})
+        if not user:
+            await update.message.reply_text("❌ यूज़र नहीं मिला।")
+            return
+
+        if user["paid"]:
+            await update.message.reply_text("✅ इस यूज़र ने पहले ही पेमेंट कर दिया है।")
+            return
+
+        users.update_one({"user_id": user_id}, {"$set": {"paid": True}})
+
+        await context.bot.send_message(chat_id=user_id,
+            text="✅ आपका पेमेंट अप्रूव हो गया है! अब आप कमाने और रेफर करने के लिए तैयार हैं।"
+        )
+        await update.message.reply_text(f"✅ @{user.get('username', 'User')} का पेमेंट सफलतापूर्वक अप्रूव किया गया।")
+    except Exception as e:
+        await update.message.reply_text(f"⚠ Error: {str(e)}")
+
+async def myteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    level1 = list(users.find({"ref_by": uid}))
+    level2 = list(users.find({"ref_by": {"$in": [u["user_id"] for u in level1]}}))
+    level3 = list(users.find({"ref_by": {"$in": [u["user_id"] for u in level2]}}))
+    await update.message.reply_text(
+        f"👥 टीम:\nLevel 1: {len(level1)}\nLevel 2: {len(level2)}\nLevel 3: {len(level3)}"
+    )
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = users.find_one({"user_id": update.effective_user.id})
+    if user:
+        await update.message.reply_text(
+            f"🧑‍💼 प्रोफ़ाइल:\nUsername: @{user.get('username','anonymous')}\nPoints: {user.get('points',0)}\nPaid: {'✅' if user.get('paid') else '❌'}"
+        )
+    else:
+        await update.message.reply_text("❌ आप रजिस्टर नहीं हैं।")
+
+async def top_referrers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    top = users.aggregate([
+        {"$group": {"_id": "$ref_by", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 10}
+    ])
+    msg = "🏆 Top Referrers:\n\n"
+    for u in top:
+        ref = users.find_one({"user_id": u["_id"]})
+        if ref:
+            msg += f"@{ref.get('username','anonymous')} - {u['count']} referrals\n"
+        else:
+            msg += f"UserID {u['_id']} - {u['count']} referrals (user not found)\n"
+    await update.message.reply_text(msg)
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("""
+📘 उपलब्ध कमांड्स:
+/start [id] – बॉट जॉइन करने के लिए
+/referral_link – अपना रेफरल लिंक पाने के लिए
+/myteam – अपनी टीम देखने के लिए
+/profile – यूज़र प्रोफ़ाइल
+/points – अपने पॉइंट्स चेक करने के लिए
+/top_referrers – सबसे ज़्यादा रेफर करने वाले
+/help – सभी कमांड्स की जानकारी
+/teamtree – 3-लेवल रेफरल ट्री
+/rewards – इनाम की जानकारी
+/stats – अपने नेटवर्क का आँकड़ा
+/broadcast – सभी यूज़र्स को admin का मैसेज
+/level – किस लेवल में कौन है
+/pay – ₹500 पेमेंट करने के लिए
+/confirm_payment – Admin द्वारा payment approve करने के लिए
+/withdraw – पैसे निकालने की रिक्वेस्ट
+/transactions – पेमेंट हिस्ट्री
+""")
+
+async def teamtree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    tree = f"🌳 Referral Tree for {user.username}:\n"
+    def fetch_level(uid, level=1):
+        members = list(users.find({"ref_by": uid}))
+        lines = ""
+        for m in members:
+            lines += "—" * level + f" @{m.get('username','anonymous')}\n"
+            lines += fetch_level(m["user_id"], level + 1)
+        return lines
+    tree += fetch_level(user.id)
+    await update.message.reply_text(tree or "कोई टीम मेंबर नहीं है।")
+
+async def rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎁 Rewards:\nLevel 1: ₹200\nLevel 2: ₹120\nLevel 3: ₹80")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    count = users.count_documents({"ref_by": uid})
+    await update.message.reply_text(f"📊 कुल रेफरल: {count}")
+
+async def level(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    lvl1 = users.find({"ref_by": uid})
+    msg = "📶 टीम स्तर:\n"
+    for l1 in lvl1:
+        msg += f"👤 @{l1.get('username','anonymous')} (L1)\n"
+        lvl2 = users.find({"ref_by": l1["user_id"]})
+        for l2 in lvl2:
+            msg += f"   └ @{l2.get('username','anonymous')} (L2)\n"
+            lvl3 = users.find({"ref_by": l2["user_id"]})
+            for l3 in lvl3:
+                msg += f"       └ @{l3.get('username','anonymous')} (L3)\n"
+    await update.message.reply_text(msg or "कोई टीम नहीं")
+
+async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"💵 ₹500 पेमेंट करें इस UPI पर:\n👉 {UPI_ID}\nफिर /confirm_payment कमांड भेजें।"
+    )
+
+async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if users.find_one({"user_id": user.id})["paid"]:
+        await update.message.reply_text("✅ आपने पहले ही पेमेंट किया है।")
+        return
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"📥 यूज़र @{user.username} ने ₹500 पेमेंट किया है। Confirm करने के लिए /approve_{user.id} भेजें।"
+    )
+    await update.message.reply_text("🕐 आपका पेमेंट admin के पास भेज दिया गया है।")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    msg = " ".join(context.args)
+    for user in users.find():
+        try:
+            await context.bot.send_message(chat_id=user["user_id"], text=msg)
+        except:
+            pass
+    await update.message.reply_text("📤 Broadcast भेज दिया गया।")
+
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧾 Withdraw system अभी उपलब्ध नहीं है।")
+
+async def transactions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧾 Transactions system अभी उपलब्ध नहीं है।")
+
+# ========== Main ==========
+
+async def main():
+    print("✅ MongoDB Connected")
+    app = ApplicationBuilder().token("8061361833:AAF9VUVxv1Fdf0dOhYqqCXrDnZaRRDMvS5I").build()
+
+    # All handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("referral_link", referral_link))
+    app.add_handler(MessageHandler(filters.Regex(r"^/approve_\d+$"), approve_payment))
+    app.add_handler(CommandHandler("myteam", myteam))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("top_referrers", top_referrers))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("teamtree", teamtree))
+    app.add_handler(CommandHandler("rewards", rewards))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("level", level))
+    app.add_handler(CommandHandler("pay", pay))
+    app.add_handler(CommandHandler("confirm_payment", confirm_payment))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("withdraw", withdraw))
+    app.add_handler(CommandHandler("transactions", transactions_cmd))
+
+    print("🤖 Bot is running...")
+    await app.run_polling()
+
+# ========== Run ==========
+
+if __name__ == "__main__":
+    asyncio.run(main())
